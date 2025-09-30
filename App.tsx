@@ -7,7 +7,6 @@ import { Loader } from './components/Loader';
 import { generateJinjaLabels } from './services/geminiService';
 import { Suggestion, SuggestionStatus } from './types';
 import mammoth from 'mammoth';
-import htmlToDocx from 'html-to-docx-file-saver';
 
 const App: React.FC = () => {
     const [file, setFile] = useState<File | null>(null);
@@ -149,7 +148,9 @@ const App: React.FC = () => {
         `;
 
         try {
-            const blob = await (htmlToDocx as any).asBlob(content);
+            // Dynamically import html-to-docx only when needed
+            const { default: HTMLtoDOCX } = await import('html-to-docx');
+            const blob = await HTMLtoDOCX(content);
 
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
