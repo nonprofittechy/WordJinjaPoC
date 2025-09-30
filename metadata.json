@@ -1,0 +1,5 @@
+{
+  "name": "DOCX Jinja2 Labeler",
+  "description": "An AI-powered tool to automatically identify placeholders in DOCX files and replace them with Jinja2 labels, allowing for review, editing, and re-exporting.",
+  "requestFramePermissions": []
+}

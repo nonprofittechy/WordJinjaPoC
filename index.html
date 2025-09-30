@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DOCX Jinja2 Labeler</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      body {
+        background-color: #111827; /* bg-gray-900 */
+        color: #f3f4f6; /* text-gray-200 */
+      }
+      .suggestion-highlight {
+        background-color: rgba(59, 130, 246, 0.5); /* bg-blue-500 with opacity */
+        padding: 2px 4px;
+        border-radius: 4px;
+        font-family: monospace;
+        color: #e5e7eb;
+      }
+      .suggestion-pending-highlight {
+        background-color: rgba(252, 211, 77, 0.3); /* bg-amber-300 with opacity */
+        padding: 2px 4px;
+        border-radius: 4px;
+        font-family: monospace;
+        color: #fde68a; /* amber-200 */
+        border: 1px dashed rgba(252, 211, 77, 0.7);
+      }
+      /* Styles for mammoth.js output */
+      .docx-preview table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+      .docx-preview th, .docx-preview td {
+        border: 1px solid #4b5563; /* gray-600 */
+        padding: 8px;
+      }
+      .docx-preview ul {
+        list-style-type: disc;
+        padding-left: 20px;
+      }
+       .docx-preview ol {
+        list-style-type: decimal;
+        padding-left: 20px;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.1.1/",
+    "react/": "https://aistudiocdn.com/react@^19.1.1/",
+    "react": "https://aistudiocdn.com/react@^19.1.1",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.21.0",
+    "mammoth": "https://aistudiocdn.com/mammoth@^1.6.0",
+    "html-to-docx-file-saver": "https://aistudiocdn.com/html-to-docx-file-saver@^1.8.0"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
