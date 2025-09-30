@@ -5,6 +5,8 @@ import { DocumentPreview } from './components/DocumentPreview';
 import { SuggestionsList } from './components/SuggestionsList';
 import { Loader } from './components/Loader';
 import { generateJinjaLabels } from './services/geminiService';
+import { createRTFDocument } from './services/exportService';
+import { createDocxWithDocxLibrary } from './services/docxService';
 import { Suggestion, SuggestionStatus } from './types';
 import mammoth from 'mammoth';
 
@@ -148,20 +150,102 @@ const App: React.FC = () => {
         `;
 
         try {
-            // Dynamically import html-to-docx only when needed
-            const { default: HTMLtoDOCX } = await import('html-to-docx');
-            const blob = await HTMLtoDOCX(content);
+            console.log('Starting document export...');
+            console.log('Content length:', content.length);
+            
+            // First, try the html-to-docx approach
+            try {
+                console.log('Attempting html-to-docx conversion...');
+                
+                // Try multiple import approaches
+                let HTMLtoDOCX;
+                try {
+                    const module = await import('html-to-docx');
+                    HTMLtoDOCX = module.default;
+                    console.log('Default import successful:', typeof HTMLtoDOCX);
+                } catch (importError) {
+                    console.log('Default import failed, trying alternatives:', importError);
+                    const module = await import('html-to-docx');
+                    HTMLtoDOCX = module.HTMLtoDOCX || module;
+                    console.log('Alternative import:', typeof HTMLtoDOCX);
+                }
+                
+                if (!HTMLtoDOCX || typeof HTMLtoDOCX !== 'function') {
+                    throw new Error(`HTMLtoDOCX is not a function: ${typeof HTMLtoDOCX}`);
+                }
+                
+                // Try with options to ensure better compatibility
+                const options = {
+                    table: { row: { cantSplit: true } },
+                    footer: true,
+                    pageNumber: true,
+                };
+                
+                const blob = await HTMLtoDOCX(content, null, options);
+                console.log('DOCX blob created successfully:', blob.size, 'bytes', blob.type);
 
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+                if (!blob || blob.size === 0) {
+                    throw new Error('Generated blob is empty or invalid');
+                }
+
+                const link = document.createElement('a');
+                const url = URL.createObjectURL(blob);
+                link.href = url;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                // Clean up the URL object
+                setTimeout(() => URL.revokeObjectURL(url), 100);
+                
+                console.log('DOCX download triggered successfully');
+                
+            } catch (docxError) {
+                console.warn('html-to-docx conversion failed, trying docx library:', docxError);
+                
+                try {
+                    // Try using the docx library as second option
+                    await createDocxWithDocxLibrary(downloadHtml, filename);
+                    console.log('DOCX export with docx library successful');
+                } catch (docxLibError) {
+                    console.warn('docx library also failed, falling back to RTF:', docxLibError);
+                    
+                    // Final fallback to RTF export
+                    const rtfFilename = filename.replace('.docx', '.rtf');
+                    const success = createRTFDocument(downloadHtml, rtfFilename);
+                    
+                    if (success) {
+                        console.log('RTF export successful');
+                        setError('DOCX export failed, but RTF file was created instead. RTF files can be opened in Word.');
+                    } else {
+                        throw new Error('All export methods failed');
+                    }
+                }
+            }
 
         } catch (e) {
-            console.error('Error creating DOCX:', e);
-            setError('Could not generate DOCX file.');
+            console.error('All export methods failed:', e);
+            console.error('Error details:', {
+                message: e instanceof Error ? e.message : 'Unknown error',
+                stack: e instanceof Error ? e.stack : 'No stack trace',
+                type: typeof e
+            });
+            
+            const errorMessage = e instanceof Error ? e.message : 'Unknown error';
+            let userFriendlyMessage = 'Could not generate document file. ';
+            
+            if (errorMessage.includes('import')) {
+                userFriendlyMessage += 'There was an issue loading the export library. Please try refreshing the page.';
+            } else if (errorMessage.includes('blob') || errorMessage.includes('empty')) {
+                userFriendlyMessage += 'The document could not be properly created. Please check if there are any accepted suggestions.';
+            } else if (errorMessage.includes('network') || errorMessage.includes('fetch')) {
+                userFriendlyMessage += 'Network error. Please check your internet connection and try again.';
+            } else {
+                userFriendlyMessage += `Error: ${errorMessage}`;
+            }
+            
+            setError(userFriendlyMessage);
         }
     };
     
