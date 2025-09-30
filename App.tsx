@@ -4,9 +4,9 @@ import { FileUpload } from './components/FileUpload';
 import { DocumentPreview } from './components/DocumentPreview';
 import { SuggestionsList } from './components/SuggestionsList';
 import { Loader } from './components/Loader';
+import { CreateLabelModal } from './components/CreateLabelModal';
 import { generateJinjaLabels } from './services/geminiService';
-import { createRTFDocument } from './services/exportService';
-import { createDocxWithDocxLibrary } from './services/docxService';
+import { docxProcessor } from './services/docxProcessor';
 import { Suggestion, SuggestionStatus } from './types';
 import mammoth from 'mammoth';
 
@@ -18,6 +18,8 @@ const App: React.FC = () => {
     const [modifiedHtml, setModifiedHtml] = useState<string>('');
     const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
     const [error, setError] = useState<string>('');
+    const [selectedText, setSelectedText] = useState<string>('');
+    const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
 
     const resetState = () => {
         setFile(null);
@@ -27,6 +29,8 @@ const App: React.FC = () => {
         setModifiedHtml('');
         setSuggestions([]);
         setError('');
+        setSelectedText('');
+        setIsModalOpen(false);
     };
     
     const processDocument = useCallback(async (selectedFile: File) => {
@@ -48,7 +52,13 @@ const App: React.FC = () => {
             const textResult = await mammoth.extractRawText({ arrayBuffer });
 
             setLoadingMessage('Generating AI suggestions...');
+            console.log('Calling generateJinjaLabels with text length:', textResult.value.length);
+            
             const aiSuggestions = await generateJinjaLabels(textResult.value);
+            console.log('Received AI suggestions:', {
+                count: aiSuggestions?.length || 0,
+                suggestions: aiSuggestions
+            });
 
             const suggestionsWithIds: Suggestion[] = aiSuggestions.map(s => ({
                 id: crypto.randomUUID(),
@@ -58,12 +68,18 @@ const App: React.FC = () => {
                 status: SuggestionStatus.Pending,
             }));
 
+            console.log('Setting suggestions with IDs:', suggestionsWithIds);
             setSuggestions(suggestionsWithIds);
 
         } catch (err) {
-            console.error(err);
+            console.error('Error in processDocument:', err);
+            console.error('Error details:', {
+                message: err instanceof Error ? err.message : 'Unknown error',
+                stack: err instanceof Error ? err.stack : 'No stack trace'
+            });
             setError(err instanceof Error ? `An error occurred: ${err.message}` : 'An unknown error occurred.');
         } finally {
+            console.log('processDocument finally block - setting loading to false');
             setIsLoading(false);
             setLoadingMessage('');
         }
@@ -113,119 +129,87 @@ const App: React.FC = () => {
         );
     }, []);
 
+    const handleTextSelection = useCallback((text: string) => {
+        // Check if this text is already in suggestions
+        const existingSuggestion = suggestions.find(s => s.original === text);
+        if (existingSuggestion) {
+            // Text is already a suggestion, don't create another one
+            return;
+        }
+        
+        setSelectedText(text);
+        setIsModalOpen(true);
+    }, [suggestions]);
+
+    const handleCreateLabel = useCallback((original: string, replacement: string, context: string) => {
+        const newSuggestion: Suggestion = {
+            id: crypto.randomUUID(),
+            context: context,
+            original: original,
+            replacement: replacement,
+            status: SuggestionStatus.Pending,
+        };
+
+        setSuggestions(currentSuggestions => [...currentSuggestions, newSuggestion]);
+        
+        // Clear the text selection
+        if (window.getSelection) {
+            window.getSelection()?.removeAllRanges();
+        }
+    }, []);
+
+    const handleCloseModal = useCallback(() => {
+        setIsModalOpen(false);
+        setSelectedText('');
+        
+        // Clear the text selection
+        if (window.getSelection) {
+            window.getSelection()?.removeAllRanges();
+        }
+    }, []);
+
     const handleDownload = async () => {
-        if (!originalHtml) return;
+        if (!file || !originalHtml) {
+            setError('No document loaded. Please upload a DOCX file first.');
+            return;
+        }
 
         const acceptedSuggestions = suggestions.filter(s => s.status === SuggestionStatus.Accepted);
         if (acceptedSuggestions.length === 0) {
             alert("No suggestions have been accepted. The downloaded file will be identical to the original.");
         }
-        
-        const replacements = new Map<string, string>();
-        acceptedSuggestions.forEach(s => {
-            replacements.set(s.original, s.replacement);
-        });
-        
-        let downloadHtml = originalHtml;
-        if (replacements.size > 0) {
-            const originals = Array.from(replacements.keys());
-            const escapedOriginals = originals.map(o => o.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-            const regex = new RegExp(escapedOriginals.join('|'), 'g');
-            downloadHtml = originalHtml.replace(regex, (matched) => replacements.get(matched) || matched);
-        }
 
-        const filename = file ? `${file.name.replace(/\.docx$/, '')}-labeled.docx` : 'labeled-document.docx';
+        const filename = `${file.name.replace(/\.docx$/, '')}-labeled.docx`;
         
-        const content = `
-            <!DOCTYPE html>
-            <html>
-            <head>
-            <meta charset="UTF-8">
-            <title>Document</title>
-            </head>
-            <body>
-                ${downloadHtml}
-            </body>
-            </html>
-        `;
-
         try {
-            console.log('Starting document export...');
-            console.log('Content length:', content.length);
+            console.log('Starting DOCX processing with original file preservation...');
+            console.log('Original file:', file.name, 'Size:', file.size);
+            console.log('Accepted suggestions:', acceptedSuggestions.length);
             
-            // First, try the html-to-docx approach
-            try {
-                console.log('Attempting html-to-docx conversion...');
-                
-                // Try multiple import approaches
-                let HTMLtoDOCX;
-                try {
-                    const module = await import('html-to-docx');
-                    HTMLtoDOCX = module.default;
-                    console.log('Default import successful:', typeof HTMLtoDOCX);
-                } catch (importError) {
-                    console.log('Default import failed, trying alternatives:', importError);
-                    const module = await import('html-to-docx');
-                    HTMLtoDOCX = module.HTMLtoDOCX || module;
-                    console.log('Alternative import:', typeof HTMLtoDOCX);
-                }
-                
-                if (!HTMLtoDOCX || typeof HTMLtoDOCX !== 'function') {
-                    throw new Error(`HTMLtoDOCX is not a function: ${typeof HTMLtoDOCX}`);
-                }
-                
-                // Try with options to ensure better compatibility
-                const options = {
-                    table: { row: { cantSplit: true } },
-                    footer: true,
-                    pageNumber: true,
-                };
-                
-                const blob = await HTMLtoDOCX(content, null, options);
-                console.log('DOCX blob created successfully:', blob.size, 'bytes', blob.type);
-
-                if (!blob || blob.size === 0) {
-                    throw new Error('Generated blob is empty or invalid');
-                }
-
-                const link = document.createElement('a');
-                const url = URL.createObjectURL(blob);
-                link.href = url;
-                link.download = filename;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                
-                // Clean up the URL object
-                setTimeout(() => URL.revokeObjectURL(url), 100);
-                
-                console.log('DOCX download triggered successfully');
-                
-            } catch (docxError) {
-                console.warn('html-to-docx conversion failed, trying docx library:', docxError);
-                
-                try {
-                    // Try using the docx library as second option
-                    await createDocxWithDocxLibrary(downloadHtml, filename);
-                    console.log('DOCX export with docx library successful');
-                } catch (docxLibError) {
-                    console.warn('docx library also failed, falling back to RTF:', docxLibError);
-                    
-                    // Final fallback to RTF export
-                    const rtfFilename = filename.replace('.docx', '.rtf');
-                    const success = createRTFDocument(downloadHtml, rtfFilename);
-                    
-                    if (success) {
-                        console.log('RTF export successful');
-                        setError('DOCX export failed, but RTF file was created instead. RTF files can be opened in Word.');
-                    } else {
-                        throw new Error('All export methods failed');
-                    }
-                }
-            }
-
+            // Use the new DOCX processor that preserves formatting
+            const modifiedDocx = await docxProcessor.processOriginalDocx(file, acceptedSuggestions);
+            
+            console.log('Modified DOCX created, size:', modifiedDocx.size);
+            
+            // Download the modified DOCX
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(modifiedDocx);
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            // Clean up the URL object
+            setTimeout(() => URL.revokeObjectURL(url), 100);
+            
+            console.log('Download triggered successfully');
+            
+            // Clear any previous errors
+            setError('');
+            
         } catch (e) {
-            console.error('All export methods failed:', e);
+            console.error('DOCX processing failed:', e);
             console.error('Error details:', {
                 message: e instanceof Error ? e.message : 'Unknown error',
                 stack: e instanceof Error ? e.stack : 'No stack trace',
@@ -233,14 +217,14 @@ const App: React.FC = () => {
             });
             
             const errorMessage = e instanceof Error ? e.message : 'Unknown error';
-            let userFriendlyMessage = 'Could not generate document file. ';
+            let userFriendlyMessage = 'Could not process the original DOCX file. ';
             
-            if (errorMessage.includes('import')) {
-                userFriendlyMessage += 'There was an issue loading the export library. Please try refreshing the page.';
-            } else if (errorMessage.includes('blob') || errorMessage.includes('empty')) {
-                userFriendlyMessage += 'The document could not be properly created. Please check if there are any accepted suggestions.';
-            } else if (errorMessage.includes('network') || errorMessage.includes('fetch')) {
-                userFriendlyMessage += 'Network error. Please check your internet connection and try again.';
+            if (errorMessage.includes('document.xml')) {
+                userFriendlyMessage += 'The DOCX file structure is not supported or may be corrupted.';
+            } else if (errorMessage.includes('ZIP') || errorMessage.includes('zip')) {
+                userFriendlyMessage += 'Could not read the DOCX file format. Please ensure it is a valid Word document.';
+            } else if (errorMessage.includes('processing')) {
+                userFriendlyMessage += 'Error applying text replacements to the document.';
             } else {
                 userFriendlyMessage += `Error: ${errorMessage}`;
             }
@@ -262,24 +246,50 @@ const App: React.FC = () => {
                     {isLoading ? (
                         <Loader message={loadingMessage} />
                     ) : (
-                         hasSuggestions && (
-                            <>
-                                <SuggestionsList suggestions={suggestions} onUpdate={handleSuggestionUpdate} onAcceptAll={handleAcceptAll} />
-                                <button
-                                    onClick={handleDownload}
-                                    disabled={!hasAcceptedSuggestions}
-                                    className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-bold py-3 px-4 rounded-lg transition-colors duration-200"
-                                >
-                                    Download Labeled DOCX
-                                </button>
-                            </>
-                        )
+                        <>
+                            {/* Debug info */}
+                            <div className="bg-gray-700 p-2 rounded text-xs text-gray-300">
+                                Debug: {suggestions.length} suggestions loaded, hasSuggestions: {hasSuggestions.toString()}
+                            </div>
+                            
+                            {hasSuggestions ? (
+                                <>
+                                    <SuggestionsList suggestions={suggestions} onUpdate={handleSuggestionUpdate} onAcceptAll={handleAcceptAll} />
+                                    <button
+                                        onClick={handleDownload}
+                                        disabled={!hasAcceptedSuggestions}
+                                        className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-bold py-3 px-4 rounded-lg transition-colors duration-200"
+                                    >
+                                        Download Modified DOCX
+                                    </button>
+                                </>
+                            ) : (
+                                originalHtml && (
+                                    <div className="bg-gray-700 p-4 rounded text-gray-300 text-center">
+                                        Document loaded but no suggestions generated.
+                                        <br />
+                                        <small>Try selecting text in the preview to create manual labels.</small>
+                                    </div>
+                                )
+                            )}
+                        </>
                     )}
                 </div>
                 <div className="lg:col-span-8 xl:col-span-9 bg-gray-800 rounded-lg shadow-2xl overflow-hidden">
-                    <DocumentPreview htmlContent={modifiedHtml || originalHtml} hasContent={!!(originalHtml)} />
+                    <DocumentPreview 
+                        htmlContent={modifiedHtml || originalHtml} 
+                        hasContent={!!(originalHtml)}
+                        onTextSelected={handleTextSelection}
+                    />
                 </div>
             </main>
+            
+            <CreateLabelModal
+                isOpen={isModalOpen}
+                selectedText={selectedText}
+                onClose={handleCloseModal}
+                onCreate={handleCreateLabel}
+            />
         </div>
     );
 };

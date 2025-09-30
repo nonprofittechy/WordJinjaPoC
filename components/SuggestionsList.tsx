@@ -11,6 +11,12 @@ interface SuggestionsListProps {
 export const SuggestionsList: React.FC<SuggestionsListProps> = ({ suggestions, onUpdate, onAcceptAll }) => {
     const hasPending = suggestions.some(s => s.status === SuggestionStatus.Pending);
     
+    console.log('SuggestionsList render:', {
+        suggestionsCount: suggestions.length,
+        hasPending,
+        suggestions: suggestions.slice(0, 3) // Log first 3 for debugging
+    });
+    
     return (
         <div className="bg-gray-800 rounded-lg p-4 flex-grow overflow-y-auto flex flex-col gap-3 max-h-[60vh]">
              <div className="flex justify-between items-center mb-2">
@@ -24,9 +30,15 @@ export const SuggestionsList: React.FC<SuggestionsListProps> = ({ suggestions, o
                     </button>
                 )}
             </div>
-            {suggestions.map(suggestion => (
-                <SuggestionItem key={suggestion.id} suggestion={suggestion} onUpdate={onUpdate} />
-            ))}
+            {suggestions.length === 0 ? (
+                <div className="text-gray-400 text-center py-4">
+                    No suggestions found. Try uploading a document with placeholder text.
+                </div>
+            ) : (
+                suggestions.map(suggestion => (
+                    <SuggestionItem key={suggestion.id} suggestion={suggestion} onUpdate={onUpdate} />
+                ))
+            )}
         </div>
     );
 };

@@ -1,0 +1,32 @@
+# Fly.io configuration file
+app = "wordjinja-poc"
+primary_region = "iad"
+
+[fly]
+  organization = "suffolk-lit-lab"
+
+[build]
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+  
+  # Health check
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 1024  # Increased memory for better performance
+
+[env]
+  # Environment variables will be set via fly secrets
