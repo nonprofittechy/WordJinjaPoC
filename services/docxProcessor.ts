@@ -200,6 +200,10 @@ class DocxTextReplacer implements DocxProcessor {
                 throw new Error('Text replacement resulted in invalid XML structure. This can happen when selected text spans across formatting boundaries.');
             }
             
+            // Apply Jinja2 syntax highlighting as a final pass
+            console.log('Applying Jinja2 syntax highlighting...');
+            modifiedXml = this.highlightJinja2Syntax(modifiedXml);
+            
             // Update the document.xml in the ZIP
             zip.file('word/document.xml', modifiedXml);
             
@@ -642,6 +646,24 @@ class DocxTextReplacer implements DocxProcessor {
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
     }
+
+    private createHighlightedJinjaVariable(replacement: string): string {
+        // Check if this is a Jinja2 variable (contains {{ and }})
+        const jinjaMatch = replacement.match(/^(\{\{\s*)([^}]+)(\s*\}\})$/);
+        
+        if (jinjaMatch) {
+            const [, openTags, variableContent, closeTags] = jinjaMatch;
+            
+            // Create XML for highlighted Jinja2 variable
+            // Structure: {{ <highlighted>variable.content</highlighted> }}
+            return `<w:t>${this.escapeXml(openTags)}</w:t>` +
+                   `<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>${this.escapeXml(variableContent)}</w:t></w:r>` +
+                   `<w:t>${this.escapeXml(closeTags)}</w:t>`;
+        } else {
+            // Not a Jinja2 variable, return as regular text
+            return `<w:t>${this.escapeXml(replacement)}</w:t>`;
+        }
+    }
     
     private wrapInTextElement(text: string): string {
         // Escape XML characters and wrap in <w:t> element
@@ -656,6 +678,161 @@ class DocxTextReplacer implements DocxProcessor {
         const lastCloseTag = beforePosition.lastIndexOf('</w:t>');
         
         return lastOpenTag > lastCloseTag;
+    }
+
+    private highlightJinja2Syntax(xml: string): string {
+        console.log('Starting Jinja2 syntax highlighting pass');
+        
+        let result = xml;
+        
+        // First, highlight Jinja2 variables {{ variable }}
+        result = this.highlightJinja2Variables(result);
+        
+        // Then, highlight Jinja2 control structures {% if/for/... %}
+        result = this.highlightJinja2ControlStructures(result);
+        
+        console.log('Jinja2 syntax highlighting completed');
+        return result;
+    }
+
+    private highlightJinja2Variables(xml: string): string {
+        console.log('Applying Jinja2 variable highlighting...');
+        
+        // Strategy: Replace entire <w:t> elements that contain Jinja2 variables
+        // with properly structured highlighting runs, highlighting only the content inside {{ }}
+        const textElementRegex = /<w:t([^>]*)>([^<]*\{\{[^}]+\}\}[^<]*)<\/w:t>/g;
+        
+        return xml.replace(textElementRegex, (match, attributes, textContent) => {
+            console.log(`Processing text with Jinja2 variables: "${textContent}"`);
+            
+            // Split the text content into parts: before, variable, after
+            const parts = [];
+            let lastIndex = 0;
+            
+            // Find all Jinja2 variables in this text element
+            // Use a regex that captures the entire content inside {{ }} without trimming
+            const variableRegex = /\{\{([^}]*)\}\}/g;
+            let varMatch;
+            
+            while ((varMatch = variableRegex.exec(textContent)) !== null) {
+                // Add text before the variable
+                if (varMatch.index > lastIndex) {
+                    const beforeText = textContent.substring(lastIndex, varMatch.index);
+                    if (beforeText) {
+                        parts.push(`<w:t${attributes}>${this.escapeXml(beforeText)}</w:t>`);
+                    }
+                }
+                
+                // Add the variable with highlighting only inside the brackets, preserving spaces
+                const variableContent = varMatch[1]; // content inside {{ }} with original spacing
+                const trimmedContent = variableContent.trim(); // the actual variable name
+                const leadingSpace = variableContent.match(/^\s*/)[0]; // leading whitespace
+                const trailingSpace = variableContent.match(/\s*$/)[0]; // trailing whitespace
+                
+                // Structure: {{ <space><highlighted>variable</highlighted><space> }}
+                parts.push(`<w:t${attributes}>${this.escapeXml('{{' + leadingSpace)}</w:t>`);
+                parts.push(`<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>${this.escapeXml(trimmedContent)}</w:t></w:r>`);
+                parts.push(`<w:t${attributes}>${this.escapeXml(trailingSpace + '}}')}</w:t>`);
+                
+                lastIndex = varMatch.index + varMatch[0].length;
+            }
+            
+            // Add any remaining text after the last variable
+            if (lastIndex < textContent.length) {
+                const afterText = textContent.substring(lastIndex);
+                if (afterText) {
+                    parts.push(`<w:t${attributes}>${this.escapeXml(afterText)}</w:t>`);
+                }
+            }
+            
+            // Wrap everything in runs if we have multiple parts
+            if (parts.length > 1) {
+                // Wrap non-highlighted parts in runs too for consistency
+                const wrappedParts = parts.map(part => {
+                    if (part.startsWith('<w:r>')) {
+                        return part; // Already wrapped
+                    } else {
+                        return `<w:r>${part}</w:r>`;
+                    }
+                });
+                return wrappedParts.join('');
+            } else if (parts.length === 1) {
+                return `<w:r>${parts[0]}</w:r>`;
+            }
+            
+            // Fallback - return original if no processing was done
+            return match;
+        });
+    }
+
+    private highlightJinja2ControlStructures(xml: string): string {
+        console.log('Applying Jinja2 control structure highlighting...');
+        
+        // Strategy: Replace entire <w:t> elements that contain Jinja2 control structures
+        // with properly structured highlighting runs, highlighting only the content inside {% %}
+        const textElementRegex = /<w:t([^>]*)>([^<]*\{%[^%]+%\}[^<]*)<\/w:t>/g;
+        
+        return xml.replace(textElementRegex, (match, attributes, textContent) => {
+            console.log(`Processing text with Jinja2 control structures: "${textContent}"`);
+            
+            // Split the text content into parts: before, control structure, after
+            const parts = [];
+            let lastIndex = 0;
+            
+            // Find all Jinja2 control structures in this text element
+            // Use a regex that captures the entire content inside {% %} without trimming
+            const controlRegex = /\{%([^%]*?)%\}/g;
+            let ctrlMatch;
+            
+            while ((ctrlMatch = controlRegex.exec(textContent)) !== null) {
+                // Add text before the control structure
+                if (ctrlMatch.index > lastIndex) {
+                    const beforeText = textContent.substring(lastIndex, ctrlMatch.index);
+                    if (beforeText) {
+                        parts.push(`<w:t${attributes}>${this.escapeXml(beforeText)}</w:t>`);
+                    }
+                }
+                
+                // Add the control structure with highlighting only inside the brackets, preserving spaces
+                const controlContent = ctrlMatch[1]; // content inside {% %} with original spacing
+                const trimmedContent = controlContent.trim(); // the actual control expression
+                const leadingSpace = controlContent.match(/^\s*/)[0]; // leading whitespace
+                const trailingSpace = controlContent.match(/\s*$/)[0]; // trailing whitespace
+                
+                // Structure: {% <space><highlighted>control</highlighted><space> %}
+                parts.push(`<w:t${attributes}>${this.escapeXml('{%' + leadingSpace)}</w:t>`);
+                parts.push(`<w:r><w:rPr><w:highlight w:val="cyan"/></w:rPr><w:t>${this.escapeXml(trimmedContent)}</w:t></w:r>`);
+                parts.push(`<w:t${attributes}>${this.escapeXml(trailingSpace + '%}')}</w:t>`);
+                
+                lastIndex = ctrlMatch.index + ctrlMatch[0].length;
+            }
+            
+            // Add any remaining text after the last control structure
+            if (lastIndex < textContent.length) {
+                const afterText = textContent.substring(lastIndex);
+                if (afterText) {
+                    parts.push(`<w:t${attributes}>${this.escapeXml(afterText)}</w:t>`);
+                }
+            }
+            
+            // Wrap everything in runs if we have multiple parts
+            if (parts.length > 1) {
+                // Wrap non-highlighted parts in runs too for consistency
+                const wrappedParts = parts.map(part => {
+                    if (part.startsWith('<w:r>')) {
+                        return part; // Already wrapped
+                    } else {
+                        return `<w:r>${part}</w:r>`;
+                    }
+                });
+                return wrappedParts.join('');
+            } else if (parts.length === 1) {
+                return `<w:r>${parts[0]}</w:r>`;
+            }
+            
+            // Fallback - return original if no processing was done
+            return match;
+        });
     }
     
     private escapeRegex(text: string): string {

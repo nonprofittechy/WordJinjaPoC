@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { XIcon } from './icons/XIcon';
+import { getDefaultSystemPrompt } from '../utils/promptClientUtils.js';
 
 interface CustomizePromptModalProps {
     isOpen: boolean;
@@ -19,22 +20,18 @@ export const CustomizePromptModal: React.FC<CustomizePromptModalProps> = ({
     const [prompt, setPrompt] = useState(currentPrompt);
     const [additionalInstructions, setAdditionalInstructions] = useState(currentAdditionalInstructions);
     const [isEditingPrompt, setIsEditingPrompt] = useState(false);
+    const [defaultPrompt, setDefaultPrompt] = useState('');
 
+    // Load default prompt from JSON file
     useEffect(() => {
-        setPrompt(currentPrompt);
-        setAdditionalInstructions(currentAdditionalInstructions);
-        // Reset editing state when modal content changes
-        setIsEditingPrompt(false);
-    }, [currentPrompt, currentAdditionalInstructions]);
-
-    const handleSave = () => {
-        onSave(prompt, additionalInstructions);
-        onClose();
-    };
-
-    const handleReset = () => {
-        // Reset to default prompt
-        const defaultPrompt = `You are an expert legal tech assistant. Your task is to process a text document and identify placeholders, turning it into a Jinja2 template. You will return a JSON structure that specifies the modifications.
+        const loadDefaultPrompt = async () => {
+            try {
+                const defaultSystemPrompt = await getDefaultSystemPrompt();
+                setDefaultPrompt(defaultSystemPrompt);
+            } catch (error) {
+                console.error('Failed to load default prompt:', error);
+                // Fallback to hardcoded prompt if loading fails
+                setDefaultPrompt(`You are an expert legal tech assistant. Your task is to process a text document and identify placeholders, turning it into a Jinja2 template. You will return a JSON structure that specifies the modifications.
 
 ## Instructions:
 1.  **Analyze**: Read the document text and identify any placeholder text (e.g., "John Smith", "________", "[Client's Name]").
@@ -55,8 +52,27 @@ export const CustomizePromptModal: React.FC<CustomizePromptModalProps> = ({
 
 Whenever you can guess the context of the user of the form, use the label "users" for the person who would use the form.
 Then, use the label "other_parties" for the person who would be on the other side of the form - opposing party in a lawsuit,
-the recipient of a letter, etc.`;
+the recipient of a letter, etc.`);
+            }
+        };
+        
+        loadDefaultPrompt();
+    }, []);
 
+    useEffect(() => {
+        setPrompt(currentPrompt);
+        setAdditionalInstructions(currentAdditionalInstructions);
+        // Reset editing state when modal content changes
+        setIsEditingPrompt(false);
+    }, [currentPrompt, currentAdditionalInstructions]);
+
+    const handleSave = () => {
+        onSave(prompt, additionalInstructions);
+        onClose();
+    };
+
+    const handleReset = () => {
+        // Reset to default prompt loaded from JSON
         setPrompt(defaultPrompt);
         setAdditionalInstructions('');
         setIsEditingPrompt(false);

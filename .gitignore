@@ -23,3 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 .env
+
+# Test output files
+tests/*.docx
+test-*.docx

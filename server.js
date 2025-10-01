@@ -3,6 +3,7 @@ import { GoogleGenAI } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { config } from 'dotenv';
+import fs from 'fs';
 
 // Load environment variables from .env file
 config();
@@ -10,6 +11,17 @@ config();
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Load prompts configuration
+let promptsConfig = null;
+try {
+    const promptsPath = path.join(__dirname, 'prompts.json');
+    const promptsData = fs.readFileSync(promptsPath, 'utf8');
+    promptsConfig = JSON.parse(promptsData);
+    console.log('Prompts configuration loaded successfully');
+} catch (error) {
+    console.error('Error loading prompts configuration:', error);
+}
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -55,31 +67,35 @@ app.post('/api/generate-labels', async (req, res) => {
         console.log('Processing document text, length:', documentText.length);
         const startTime = Date.now();
 
-        // Use custom prompt if provided, otherwise use default
-        const defaultPrompt = `You are an expert legal tech assistant. Your task is to process a text document and identify placeholders, turning it into a Jinja2 template. You will return a JSON structure that specifies the modifications.
+        // Get the default prompt from configuration
+        let roleDescription = customPrompt;
+        let responseSchema = null;
+        let modelConfig = {
+            temperature: 0.3,
+            responseMimeType: "application/json"
+        };
 
-## Instructions:
-1.  **Analyze**: Read the document text and identify any placeholder text (e.g., "John Smith", "________", "[Client's Name]").
-2.  **Label**: Replace these placeholders with appropriate Jinja2 variable names based on the provided conventions.
-3.  **Contextualize**: For each replacement, provide a snippet of the surrounding text (the "context") to ensure the replacement is unique and understandable. The original placeholder must be part of the context.
-4.  **Format**: Return the result as a JSON object containing a single key "results", which is an array of suggestion objects. Each object must have "context", "original" (the exact text to be replaced), and "replacement" (the new Jinja2 label).
+        if (!customPrompt && promptsConfig) {
+            // Use the default prompt from prompts.json
+            const defaultPromptConfig = promptsConfig.prompts.find(p => p.id === 'default');
+            if (defaultPromptConfig) {
+                const systemMessage = defaultPromptConfig.prompt.find(p => p.role === 'system');
+                if (systemMessage) {
+                    roleDescription = systemMessage.content;
+                }
+                responseSchema = defaultPromptConfig.responseSchema;
+                
+                // Merge model configuration
+                if (defaultPromptConfig.config) {
+                    modelConfig = { ...modelConfig, ...defaultPromptConfig.config };
+                }
+            }
+        }
 
-## Variable Naming Rules:
--   Use Python snake_case for variable names.
--   Represent people in lists (e.g., \`users\`, \`clients\`, \`other_parties\`). Access individuals with an index (e.g., \`users[0]\`).
--   Use Docassemble object conventions:
-    -   **Names**: \`users[0].name.full()\`, \`users[0].name.first\`, \`users[0].name.last\`.
-    -   **Addresses**: \`users[0].address.block()\`, \`users[0].address.city\`, \`users[0].address.zip\`.
-    -   **Contact**: \`users[0].phone_number\`, \`users[0].email\`.
-    -   **Dates**: Use the \`_date\` suffix, e.g., \`signature_date\`.
--   Common list names: \`users\`, \`clients\`, \`plaintiffs\`, \`defendants\`, \`children\`, \`attorneys\`, \`witnesses\`.
--   For generic placeholders, create a descriptive variable name (e.g., "reason for eviction" becomes \`{{ eviction_reason }}\`).
-
-Whenever you can guess the context of the user of the form, use the label "users" for the person who would use the form.
-Then, use the label "other_parties" for the person who would be on the other side of the form - opposing party in a lawsuit,
-the recipient of a letter, etc.`;
-
-        let roleDescription = customPrompt || defaultPrompt;
+        // Fallback to a basic prompt if configuration is missing
+        if (!roleDescription) {
+            roleDescription = `You are an expert legal tech assistant. Analyze the document and identify placeholders that should be replaced with Jinja2 variables. Return a JSON object with a "results" array containing objects with "context", "original", and "replacement" fields.`;
+        }
 
         // Add additional instructions if provided
         if (additionalInstructions && additionalInstructions.trim()) {
@@ -89,42 +105,45 @@ the recipient of a letter, etc.`;
         console.log('Using custom prompt:', !!customPrompt);
         console.log('Additional instructions provided:', !!additionalInstructions);
 
-        const responseSchema = {
-            type: "object",
-            properties: {
-                results: {
-                    type: "array",
-                    items: {
-                        type: "object",
-                        properties: {
-                            context: {
-                                type: "string",
-                                description: "A snippet of text surrounding the placeholder to provide context."
+        // Default response schema if not provided in config
+        if (!responseSchema) {
+            responseSchema = {
+                type: "object",
+                properties: {
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                context: {
+                                    type: "string",
+                                    description: "A snippet of text surrounding the placeholder to provide context."
+                                },
+                                original: {
+                                    type: "string",
+                                    description: "The exact placeholder text to be replaced."
+                                },
+                                replacement: {
+                                    type: "string",
+                                    description: "The suggested Jinja2 variable label."
+                                }
                             },
-                            original: {
-                                type: "string",
-                                description: "The exact placeholder text to be replaced."
-                            },
-                            replacement: {
-                                type: "string",
-                                description: "The suggested Jinja2 variable label."
-                            }
-                        },
-                        required: ["context", "original", "replacement"]
+                            required: ["context", "original", "replacement"]
+                        }
                     }
-                }
-            },
-            required: ["results"]
-        };
+                },
+                required: ["results"]
+            };
+        }
 
         const response = await geminiAI.models.generateContent({
-            model: "gemini-2.5-flash",
+            model: modelConfig.model || "gemini-2.5-flash",
             contents: documentText,
             config: {
                 systemInstruction: roleDescription,
-                responseMimeType: "application/json",
+                responseMimeType: modelConfig.responseMimeType || "application/json",
                 responseSchema: responseSchema,
-                temperature: 0.3,
+                temperature: modelConfig.temperature || 0.3,
             },
         });
 
@@ -158,6 +177,26 @@ the recipient of a letter, etc.`;
         console.error('Error calling Gemini API:', error);
         res.status(500).json({ 
             error: 'Failed to process document. Please try again.',
+            details: error instanceof Error ? error.message : 'Unknown error'
+        });
+    }
+});
+
+// API endpoint to get prompts configuration
+app.get('/api/prompts/config', (req, res) => {
+    try {
+        if (!promptsConfig) {
+            return res.status(500).json({
+                error: 'Prompts configuration not loaded',
+                details: 'The prompts.json file could not be loaded at server startup'
+            });
+        }
+        
+        res.json(promptsConfig);
+    } catch (error) {
+        console.error('Error serving prompts config:', error);
+        res.status(500).json({
+            error: 'Failed to serve prompts configuration',
             details: error instanceof Error ? error.message : 'Unknown error'
         });
     }
