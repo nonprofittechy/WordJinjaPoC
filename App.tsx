@@ -10,6 +10,7 @@ import { SettingsIcon } from './components/icons/SettingsIcon'
 import RefreshIcon from './components/icons/RefreshIcon'
 import { generateJinjaLabels } from './services/geminiService';
 import { docxProcessor } from './services/docxProcessor';
+import { getDefaultSystemPrompt } from './utils/promptClientUtils.js';
 import { Suggestion, SuggestionStatus } from './types';
 import mammoth from 'mammoth';
 
@@ -26,10 +27,19 @@ const App: React.FC = () => {
     const [isPromptModalOpen, setIsPromptModalOpen] = useState<boolean>(false);
     const [customPrompt, setCustomPrompt] = useState<string>('');
     const [additionalInstructions, setAdditionalInstructions] = useState<string>('');
+    const [promptLoading, setPromptLoading] = useState<boolean>(true);
 
     // Initialize default prompt on component mount
     useEffect(() => {
-        const defaultPrompt = `You are an expert legal tech assistant. Your task is to process a text document and identify placeholders, turning it into a Jinja2 template. You will return a JSON structure that specifies the modifications.
+        const loadDefaultPrompt = async () => {
+            setPromptLoading(true);
+            try {
+                const systemPrompt = await getDefaultSystemPrompt();
+                if (systemPrompt) {
+                    setCustomPrompt(systemPrompt);
+                } else {
+                    // Fallback to hardcoded prompt if JSON loading fails
+                    const fallbackPrompt = `You are an expert legal tech assistant. Your task is to process a text document and identify placeholders, turning it into a Jinja2 template. You will return a JSON structure that specifies the modifications.
 
 ## Instructions:
 1.  **Analyze**: Read the document text and identify any placeholder text (e.g., "John Smith", "________", "[Client's Name]").
@@ -51,8 +61,40 @@ const App: React.FC = () => {
 Whenever you can guess the context of the user of the form, use the label "users" for the person who would use the form.
 Then, use the label "other_parties" for the person who would be on the other side of the form - opposing party in a lawsuit,
 the recipient of a letter, etc.`;
+                    setCustomPrompt(fallbackPrompt);
+                }
+            } catch (error) {
+                console.error('Failed to load default prompt from JSON:', error);
+                // Use fallback prompt
+                const fallbackPrompt = `You are an expert legal tech assistant. Your task is to process a text document and identify placeholders, turning it into a Jinja2 template. You will return a JSON structure that specifies the modifications.
 
-        setCustomPrompt(defaultPrompt);
+## Instructions:
+1.  **Analyze**: Read the document text and identify any placeholder text (e.g., "John Smith", "________", "[Client's Name]").
+2.  **Label**: Replace these placeholders with appropriate Jinja2 variable names based on the provided conventions.
+3.  **Contextualize**: For each replacement, provide a snippet of the surrounding text (the "context") to ensure the replacement is unique and understandable. The original placeholder must be part of the context.
+4.  **Format**: Return the result as a JSON object containing a single key "results", which is an array of suggestion objects. Each object must have "context", "original" (the exact text to be replaced), and "replacement" (the new Jinja2 label).
+
+## Variable Naming Rules:
+-   Use Python snake_case for variable names.
+-   Represent people in lists (e.g., \`users\`, \`clients\`, \`other_parties\`). Access individuals with an index (e.g., \`users[0]\`).
+-   Use Docassemble object conventions:
+    -   **Names**: \`users[0].name.full()\`, \`users[0].name.first\`, \`users[0].name.last\`.
+    -   **Addresses**: \`users[0].address.block()\`, \`users[0].address.city\`, \`users[0].address.zip\`.
+    -   **Contact**: \`users[0].phone_number\`, \`users[0].email\`.
+    -   **Dates**: Use the \`_date\` suffix, e.g., \`signature_date\`.
+-   Common list names: \`users\`, \`clients\`, \`plaintiffs\`, \`defendants\`, \`children\`, \`attorneys\`, \`witnesses\`.
+-   For generic placeholders, create a descriptive variable name (e.g., "reason for eviction" becomes \`{{ eviction_reason }}\`).
+
+Whenever you can guess the context of the user of the form, use the label "users" for the person who would use the form.
+Then, use the label "other_parties" for the person who would be on the other side of the form - opposing party in a lawsuit,
+the recipient of a letter, etc.`;
+                setCustomPrompt(fallbackPrompt);
+            } finally {
+                setPromptLoading(false);
+            }
+        };
+
+        loadDefaultPrompt();
     }, []);
 
     const resetState = () => {
@@ -335,6 +377,53 @@ the recipient of a letter, etc.`;
             <Header />
             <main className="flex-grow p-4 md:p-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
                 <div className="lg:col-span-4 xl:col-span-3 flex flex-col gap-6">
+                    {/* AI Prompt Configuration Section - Always Visible */}
+                    <div className="bg-gray-800 border border-gray-600 rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-sm font-medium text-gray-300">AI Prompt Configuration</h3>
+                            <button
+                                onClick={handleCustomizePrompt}
+                                disabled={promptLoading}
+                                className="px-3 py-1 text-xs font-medium bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:cursor-not-allowed text-gray-300 hover:text-white disabled:text-gray-500 border border-gray-600 hover:border-gray-500 disabled:border-gray-700 rounded transition-all duration-200"
+                            >
+                                <SettingsIcon className="w-3 h-3 inline mr-1" />
+                                Customize
+                            </button>
+                        </div>
+                        <div className="text-xs text-gray-400">
+                            {promptLoading ? (
+                                <div className="flex items-center">
+                                    <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-400 mr-2"></div>
+                                    Loading prompt configuration...
+                                </div>
+                            ) : (
+                                <>
+                                    <div className="mb-2">
+                                        <span className="font-medium">Prompt:</span>{' '}
+                                        {customPrompt.length > 100 
+                                            ? `${customPrompt.substring(0, 100)}...` 
+                                            : customPrompt || 'Default prompt loaded'
+                                        }
+                                    </div>
+                                    {additionalInstructions && (
+                                        <div>
+                                            <span className="font-medium">Additional Instructions:</span>{' '}
+                                            {additionalInstructions.length > 50 
+                                                ? `${additionalInstructions.substring(0, 50)}...` 
+                                                : additionalInstructions
+                                            }
+                                        </div>
+                                    )}
+                                    {!additionalInstructions && (
+                                        <div className="text-gray-500">
+                                            No additional instructions set
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
+                    </div>
+
                     <FileUpload onFileSelect={processDocument} disabled={isLoading} />
                     {error && <div className="bg-red-900/50 border border-red-700 text-red-300 p-3 rounded-md">{error}</div>}
                     {isLoading ? (
@@ -344,13 +433,6 @@ the recipient of a letter, etc.`;
                             {hasSuggestions ? (
                                 <>
                                     <div className="flex justify-end gap-1 mb-4">
-                                        <button
-                                            onClick={handleCustomizePrompt}
-                                            title="Customize AI prompt and instructions"
-                                            className="p-2 bg-gray-700/50 hover:bg-gray-600 text-gray-400 hover:text-white border border-gray-600 hover:border-gray-500 rounded transition-all duration-200"
-                                        >
-                                            <SettingsIcon className="w-4 h-4" />
-                                        </button>
                                         <button
                                             onClick={handleRegenerateSuggestions}
                                             disabled={isLoading}
@@ -382,11 +464,22 @@ the recipient of a letter, etc.`;
                     )}
                 </div>
                 <div className="lg:col-span-8 xl:col-span-9 bg-gray-800 rounded-lg shadow-2xl overflow-hidden">
-                    <DocumentPreview 
-                        htmlContent={modifiedHtml || originalHtml} 
-                        hasContent={!!(originalHtml)}
-                        onTextSelected={handleTextSelection}
-                    />
+                    {!originalHtml && !isLoading ? (
+                        <div className="flex flex-col items-center justify-center h-96 text-gray-400 p-8">
+                            <div className="text-6xl mb-6">📄</div>
+                            <h3 className="text-xl font-medium mb-4 text-gray-300">Ready to Convert Your Document</h3>
+                            <div className="text-center space-y-2 max-w-md">
+                                <p>Upload a DOCX file to automatically identify placeholders and convert them to Jinja2 template variables.</p>
+                                <p className="text-sm">You can customize the AI prompt settings above before uploading your document.</p>
+                            </div>
+                        </div>
+                    ) : (
+                        <DocumentPreview 
+                            htmlContent={modifiedHtml || originalHtml} 
+                            hasContent={!!(originalHtml)}
+                            onTextSelected={handleTextSelection}
+                        />
+                    )}
                 </div>
             </main>
             

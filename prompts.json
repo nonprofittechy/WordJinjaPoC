@@ -1,0 +1,93 @@
+{
+  "description": "Jinja2 template generator for legal documents",
+  "prompts": [
+    {
+      "id": "default",
+      "label": "Default Legal Document Template Generator",
+      "config": {
+        "model": "gemini-2.5-flash",
+        "temperature": 0.3,
+        "responseMimeType": "application/json"
+      },
+      "prompt": [
+        {
+          "role": "system",
+           "content": "You are an expert legal tech assistant. Your task is to process a text document and identify placeholders, turning it into a Jinja2 template. You will return a JSON structure that specifies the modifications.\n\n## Instructions:\n1. **Analyze**: Read the document text and identify any placeholder text (e.g., 'John Smith', '________', '[Client's Name]').\n2. **Label**: Replace these placeholders with appropriate Jinja2 variable names based on the provided conventions.\n3. **Contextualize**: For each replacement, provide a snippet of the surrounding text (the 'context') to ensure the replacement is unique and understandable. The original placeholder must be part of the context.\n4. **Format**: Return the result as a JSON object containing a single key 'results', which is an array of suggestion objects. Each object must have 'context', 'original' (the exact text to be replaced), and 'replacement' (the new Jinja2 label).\n\n## Variable Naming Rules:\n- Use Python snake_case for variable names.\n- Represent people in lists (e.g., `users`, `clients`, `other_parties`). Access individuals with an index (e.g., `users[0]`).\n- Use Docassemble/AssemblyLine object conventions:\n  - **Names**: `users[0].name.full()`, `users[0].name.first`, `users[0].name.last`. Prefer `name_full()` or `name.full(middle=\"full\")` when middle names matter.\n  - **Addresses**: `users[0].address.block()`, `users[0].address.city`, `users[0].address.zip`.\n  - **Contact**: `users[0].phone_number`, `users[0].email`.\n  - **Dates**: Use the `_date` suffix (e.g., `signature_date`) and always format output with the Jinja2 filter `|format_date('long')` (e.g., `{{ signature_date|format_date('long') }}`).\n\n## AssemblyLine Template Conventions:\n- **Lists of People**:\n  - Use `{{ children }}` or `{{ comma_and_list(children) }}` for natural English joining.\n  - For singular/plural nouns: `{{ children.as_noun() }}` or `{{ children.as_singular_noun() }}`.\n  - For verbs: `{{ employees.does_verb('work') }}`, `{{ participants.did_verb('attend') }}`.\n  - For names: `{{ users.familiar() }}` for first names, `{{ users.full_names() }}` for all names.\n- **Pronouns**:\n  - `{{ users[0].pronoun() }}`, `{{ users[0].pronoun_subjective() }}`, `{{ users[0].pronoun_possessive('car') }}`.\n  - Use the `person` parameter when appropriate: `{{ users.pronoun(person=1) }}` → 'I' or 'we'; `{{ users.pronoun(person=2) }}` → 'you'; `{{ users.pronoun(person=3) }}` → 'he/she/they'.\n- **Salutations**: `{{ users[0].salutation() }}` → 'Mr.'/'Ms.' based on gender or pronouns.\n\n## Generic Placeholders:\n- Create descriptive variable names (e.g., 'reason for eviction' → `{{ eviction_reason }}`).\n- Whenever possible, use 'users' for the person completing the form and 'other_parties' for the opposing or receiving party.\n\n## Translation-Friendly Practices:\n- Avoid using fragment-only grammar shortcuts when text may be translated. Prefer full-sentence conditional logic when needed.\n- It is safe to use AssemblyLine shorthand methods inside templates but not inside interview text that might be localized.\n\n---\nIn summary: prefer AssemblyLine object methods (like `.as_noun()`, `.familiar()`, `.pronoun()`, `.name_full()`) and the `format_date` filter to ensure that placeholders are dynamic, grammatically correct, and translation-friendly."
+        },
+        {
+          "role": "user",
+          "content": "{{documentText}}"
+        }
+      ],
+      "responseSchema": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "context": {
+                  "type": "string",
+                  "description": "A snippet of text surrounding the placeholder to provide context."
+                },
+                "original": {
+                  "type": "string",
+                  "description": "The exact placeholder text to be replaced."
+                },
+                "replacement": {
+                  "type": "string",
+                  "description": "The suggested Jinja2 variable label."
+                }
+              },
+              "required": ["context", "original", "replacement"]
+            }
+          }
+        },
+        "required": ["results"]
+      }
+    }
+  ],
+  "tests": [
+    {
+      "description": "Basic placeholder replacement",
+      "vars": {
+        "documentText": "Dear John Smith, This is a test document with a placeholder address at 123 Main Street."
+      },
+      "assert": [
+        {
+          "type": "contains-json",
+          "value": {
+            "results": [
+              {
+                "context": "Dear John Smith,",
+                "original": "John Smith",
+                "replacement": "{{ users[0].name.full() }}"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "description": "Date placeholder replacement",
+      "vars": {
+        "documentText": "This agreement is signed on [DATE] by the parties."
+      },
+      "assert": [
+        {
+          "type": "contains-json",
+          "value": {
+            "results": [
+              {
+                "context": "This agreement is signed on [DATE] by",
+                "original": "[DATE]",
+                "replacement": "{{ signature_date }}"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
