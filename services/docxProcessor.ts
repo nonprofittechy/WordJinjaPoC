@@ -25,6 +25,11 @@ class DocxTextReplacer implements DocxProcessor {
             
             console.log('Original document.xml length:', documentXml.length);
             
+            // Debug: Check for tabs in the original XML
+            const tabElements = (documentXml.match(/<w:tab[^>]*\/?>/g) || []).length;
+            const literalTabs = (documentXml.match(/\t/g) || []).length;
+            console.log(`Document contains ${tabElements} <w:tab> elements and ${literalTabs} literal tab characters`);
+            
             // Apply text replacements to the XML content
             let modifiedXml = documentXml;
             
@@ -32,9 +37,25 @@ class DocxTextReplacer implements DocxProcessor {
             const plainText = this.extractPlainTextFromXml(documentXml);
             console.log('Extracted plain text length:', plainText.length);
             
+            // Debug: Check for tabs in extracted text
+            const extractedTabs = (plainText.match(/\t/g) || []).length;
+            console.log(`Extracted text contains ${extractedTabs} tab characters`);
+            if (extractedTabs > 0) {
+                console.log('Sample of extracted text with tabs:', plainText.substring(0, 200).replace(/\t/g, '[TAB]'));
+            }
+            
             console.log(`Processing ${acceptedSuggestions.length} suggestions`);
             
-            acceptedSuggestions.forEach((suggestion, index) => {
+            // Debug: Check what types of suggestions we have
+            const tabSuggestions = acceptedSuggestions.filter(s => s.original === '\t');
+            if (tabSuggestions.length > 0) {
+                console.log(`Found ${tabSuggestions.length} tab suggestions:`, tabSuggestions);
+            }
+            
+            // Sort suggestions by length (longest first) to avoid partial replacements
+            const sortedSuggestions = acceptedSuggestions.sort((a, b) => b.original.length - a.original.length);
+            
+            sortedSuggestions.forEach((suggestion, index) => {
                 const displayOriginal = suggestion.original.replace(/\t/g, '\\t').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
                 console.log(`Applying suggestion ${index + 1}:`, {
                     original: displayOriginal,
@@ -43,19 +64,61 @@ class DocxTextReplacer implements DocxProcessor {
                     isWhitespace: /^[\s\t\n\r]+$/.test(suggestion.original)
                 });
                 
+                // Skip if this text has already been replaced (check if replacement is already in the XML)
+                // For tabs, be more specific since {{ }} might appear in other contexts
+                if (suggestion.original === '\t') {
+                    // For tab replacements, check if the exact replacement wrapped in <w:t> already exists
+                    const wrappedReplacement = `<w:t>${this.escapeXml(suggestion.replacement)}</w:t>`;
+                    if (modifiedXml.includes(wrappedReplacement)) {
+                        console.log(`⚠ Tab replacement "${suggestion.replacement}" already exists in document, skipping`);
+                        return;
+                    }
+                } else if (modifiedXml.includes(suggestion.replacement)) {
+                    console.log(`⚠ Replacement "${suggestion.replacement}" already exists in document, skipping`);
+                    return;
+                }
+                
+                // Count occurrences before replacement to limit replacements
+                const occurrenceCount = this.countOccurrences(modifiedXml, suggestion.original);
+                if (occurrenceCount === 0) {
+                    if (suggestion.original === '\t') {
+                        console.log(`⚠ Tab character not found in document (neither <w:tab/> elements nor literal tabs), skipping`);
+                        // Debug: Show what tab-related content exists
+                        const tabSample = modifiedXml.substring(0, 1000);
+                        const tabElementsInSample = (tabSample.match(/<w:tab[^>]*\/?>/g) || []).length;
+                        console.log(`Debug: First 1000 chars contain ${tabElementsInSample} <w:tab> elements`);
+                    } else {
+                        console.log(`⚠ Text "${displayOriginal}" not found in document, skipping`);
+                    }
+                    return;
+                }
+                
+                if (occurrenceCount > 10) {
+                    console.warn(`⚠ Text "${displayOriginal}" appears ${occurrenceCount} times, this might cause issues. Limiting to first occurrence.`);
+                }
+                
                 try {
                     const beforeLength = modifiedXml.length;
+                    const beforeXml = modifiedXml; // Keep backup
                     
-                    // Use a safer replacement approach
-                    modifiedXml = this.safeReplaceText(modifiedXml, suggestion.original, suggestion.replacement);
+                    // Use a safer replacement approach with limits
+                    modifiedXml = this.safeReplaceText(modifiedXml, suggestion.original, suggestion.replacement, Math.min(occurrenceCount, 1));
                     
                     const afterLength = modifiedXml.length;
                     const wasReplaced = afterLength !== beforeLength;
                     
                     // Check for runaway replacement (string grew too much)
-                    if (afterLength > beforeLength * 2) {
+                    if (afterLength > beforeLength * 1.2) {
                         console.error(`Replacement caused excessive growth, reverting. Before: ${beforeLength}, After: ${afterLength}`);
-                        modifiedXml = documentXml; // Revert to original
+                        modifiedXml = beforeXml; // Revert to state before this replacement
+                        return;
+                    }
+                    
+                    // Validate XML structure after each replacement
+                    if (wasReplaced && !this.isValidXml(modifiedXml)) {
+                        console.error(`Replacement of "${suggestion.original}" corrupted XML structure, reverting`);
+                        modifiedXml = beforeXml; // Revert to state before this replacement
+                        console.log(`⚠ Skipped replacement "${displayOriginal}" due to XML structure concerns`);
                         return;
                     }
                     
@@ -100,6 +163,12 @@ class DocxTextReplacer implements DocxProcessor {
                 }
             });
             
+            // Validate the modified XML before saving
+            if (!this.isValidXml(modifiedXml)) {
+                console.error('Modified XML is invalid, reverting to original');
+                throw new Error('Text replacement resulted in invalid XML structure. This can happen when selected text spans across formatting boundaries.');
+            }
+            
             // Update the document.xml in the ZIP
             zip.file('word/document.xml', modifiedXml);
             
@@ -121,28 +190,63 @@ class DocxTextReplacer implements DocxProcessor {
     }
     
     private extractPlainTextFromXml(xml: string): string {
+        // Convert special DOCX elements to their text equivalents BEFORE removing tags
+        let processedXml = xml
+            .replace(/<w:tab[^>]*\/?>/g, '\t')  // Convert <w:tab/> elements to literal tabs
+            .replace(/<w:br[^>]*\/?>/g, '\n')  // Convert <w:br/> elements to newlines
+            .replace(/<w:p[^>]*>/g, '\n');     // Convert paragraph starts to newlines
+        
         // Remove XML tags and extract text content
-        return xml
-            .replace(/<[^>]*>/g, '') // Remove all XML tags
+        return processedXml
+            .replace(/<[^>]*>/g, '') // Remove all remaining XML tags
             .replace(/&lt;/g, '<')   // Decode XML entities
             .replace(/&gt;/g, '>')
             .replace(/&quot;/g, '"')
             .replace(/&#39;/g, "'")
             .replace(/&amp;/g, '&')
-            .replace(/\s+/g, ' ')    // Normalize whitespace
+            .replace(/\n\s*\n/g, '\n')  // Normalize multiple newlines
+            .replace(/[ ]+/g, ' ')      // Normalize spaces (but preserve tabs and newlines)
             .trim();
     }
     
-    private replaceTextAcrossXmlTags(xml: string, searchText: string, replacement: string): string {
-        // This is a more sophisticated approach that can handle text split across XML tags
-        // Create a pattern that allows for XML tags between characters
-        const characters = searchText.split('');
-        const flexiblePattern = characters
-            .map(char => this.escapeRegex(char))
-            .join('(?:<[^>]*>)*\\s*'); // Allow XML tags and whitespace between characters
+    private replaceTextAcrossXmlTags(xml: string, searchText: string, replacement: string, maxReplacements?: number): string {
+        // SAFE approach: Only replace text within individual <w:t> elements
+        // This prevents breaking XML structure by replacing across element boundaries
         
-        const regex = new RegExp(flexiblePattern, 'gi');
-        return xml.replace(regex, replacement);
+        console.log(`Attempting safe cross-tag replacement for: "${searchText}"`);
+        
+        // Find all <w:t> elements and process them individually
+        let result = xml;
+        const textElementRegex = /<w:t([^>]*)>([^<]*)<\/w:t>/g;
+        let replacementsMade = 0;
+        
+        result = result.replace(textElementRegex, (match, attributes, textContent) => {
+            // Only replace within this specific text element
+            if (textContent.includes(searchText) && (!maxReplacements || replacementsMade < maxReplacements)) {
+                console.log(`Found "${searchText}" in text element: "${textContent}"`);
+                const newContent = textContent.replace(new RegExp(this.escapeRegex(searchText), maxReplacements && maxReplacements - replacementsMade === 1 ? '' : 'g'), replacement);
+                replacementsMade++;
+                return `<w:t${attributes}>${newContent}</w:t>`;
+            }
+            return match;
+        });
+        
+        // If no replacement was made in text elements, try a more conservative approach
+        if (result === xml) {
+            console.log(`No replacement in text elements, trying word boundary approach`);
+            
+            // Only try replacement if we can find the exact text surrounded by word boundaries
+            // and not crossing XML tag boundaries
+            const safePattern = `(>[^<]*?)${this.escapeRegex(searchText)}([^<]*?<)`;
+            const safeRegex = new RegExp(safePattern, 'g');
+            
+            result = xml.replace(safeRegex, (match, before, after) => {
+                console.log(`Safe replacement found: "${match}"`);
+                return `${before}${replacement}${after}`;
+            });
+        }
+        
+        return result;
     }
     
     private findSimilarText(plainText: string, searchText: string): string | null {
@@ -182,7 +286,7 @@ class DocxTextReplacer implements DocxProcessor {
         return null;
     }
     
-    private safeReplaceText(xml: string, original: string, replacement: string): string {
+    private safeReplaceText(xml: string, original: string, replacement: string, maxReplacements?: number): string {
         try {
             // Handle empty suggestions
             if (!original || original.length === 0) {
@@ -202,17 +306,17 @@ class DocxTextReplacer implements DocxProcessor {
             
             if (isWhitespaceOnly) {
                 console.log(`Handling whitespace-only replacement: "${original}"`);
-                return this.replaceWhitespaceText(xml, original, escapedReplacement);
+                return this.replaceWhitespaceText(xml, original, escapedReplacement, maxReplacements);
             }
             
             if (isSingleTab) {
                 console.log(`Handling single tab replacement`);
-                return this.replaceTabCharacter(xml, escapedReplacement);
+                return this.replaceTabCharacter(xml, escapedReplacement, maxReplacements);
             }
             
             // For regular text with non-whitespace characters, use standard replacement
             if (hasNonWhitespace) {
-                return this.replaceRegularText(xml, original, escapedReplacement);
+                return this.replaceRegularText(xml, original, escapedReplacement, maxReplacements);
             }
             
             console.warn(`Unhandled replacement case for: "${original}"`);
@@ -224,23 +328,48 @@ class DocxTextReplacer implements DocxProcessor {
         }
     }
     
-    private replaceRegularText(xml: string, original: string, replacement: string): string {
+    private replaceRegularText(xml: string, original: string, replacement: string, maxReplacements?: number): string {
         // Normalize the original text
         const normalizedOriginal = original.trim().replace(/\s+/g, ' ');
         
-        // Try exact replacement first
-        const exactRegex = new RegExp(this.escapeRegex(original), 'g');
-        let result = xml.replace(exactRegex, replacement);
+        // Try exact replacement first (limit to maxReplacements if specified)
+        const exactRegex = new RegExp(this.escapeRegex(original), maxReplacements ? '' : 'g');
+        let result = xml;
+        
+        if (maxReplacements && maxReplacements > 0) {
+            // Replace only the specified number of occurrences
+            let replacements = 0;
+            result = xml.replace(new RegExp(this.escapeRegex(original), 'g'), (match) => {
+                if (replacements < maxReplacements) {
+                    replacements++;
+                    return replacement;
+                }
+                return match;
+            });
+        } else {
+            result = xml.replace(exactRegex, replacement);
+        }
         
         // If that didn't work, try normalized version
         if (result === xml && normalizedOriginal !== original) {
-            const normalizedRegex = new RegExp(this.escapeRegex(normalizedOriginal), 'g');
-            result = xml.replace(normalizedRegex, replacement);
+            if (maxReplacements && maxReplacements > 0) {
+                let replacements = 0;
+                result = xml.replace(new RegExp(this.escapeRegex(normalizedOriginal), 'g'), (match) => {
+                    if (replacements < maxReplacements) {
+                        replacements++;
+                        return replacement;
+                    }
+                    return match;
+                });
+            } else {
+                const normalizedRegex = new RegExp(this.escapeRegex(normalizedOriginal), 'g');
+                result = xml.replace(normalizedRegex, replacement);
+            }
         }
         
         // Try context-aware replacement across XML tags
         if (result === xml) {
-            result = this.replaceTextAcrossXmlTags(xml, original, replacement);
+            result = this.replaceTextAcrossXmlTags(xml, original, replacement, maxReplacements);
         }
         
         // Safety check: ensure we're not creating a runaway replacement
@@ -252,7 +381,7 @@ class DocxTextReplacer implements DocxProcessor {
         return result;
     }
     
-    private replaceWhitespaceText(xml: string, original: string, replacement: string): string {
+    private replaceWhitespaceText(xml: string, original: string, replacement: string, maxReplacements?: number): string {
         try {
             console.log('Starting whitespace text replacement...');
             
@@ -267,100 +396,46 @@ class DocxTextReplacer implements DocxProcessor {
             
             let result = xml;
             
-            // Strategy 1: Look for <w:tab/> elements and replace them
+            // For tab characters, delegate to the specialized tab replacement method
             if (original === '\t') {
-                console.log('Attempting to replace <w:tab/> elements...');
-                const tabElementRegex = /<w:tab\s*\/>/g;
-                const beforeTabReplace = result.length;
-                
-                // Wrap replacement text in proper DOCX text element
-                const wrappedReplacement = `<w:t>${replacement}</w:t>`;
-                
-                result = result.replace(tabElementRegex, wrappedReplacement);
-                const afterTabReplace = result.length;
-                
-                if (afterTabReplace !== beforeTabReplace) {
-                    console.log(`✓ Successfully replaced ${(beforeTabReplace - afterTabReplace + wrappedReplacement.length) / wrappedReplacement.length} <w:tab/> elements with wrapped text`);
-                    return result;
-                }
-                
-                // Strategy 2: Look for tabs within <w:t> elements
-                console.log('Attempting to replace tabs within <w:t> elements...');
-                result = result.replace(/<w:t([^>]*)>([^<]*\t[^<]*)<\/w:t>/g, (match, attributes, textContent) => {
-                    console.log(`Found tab in text element: "${textContent}"`);
-                    const newContent = textContent.replace(/\t/g, replacement);
-                    return `<w:t${attributes}>${newContent}</w:t>`;
-                });
-                
-                if (result !== xml) {
-                    console.log('✓ Successfully replaced tabs within <w:t> elements');
-                    return result;
-                }
-                
-                // Strategy 3: Look for tabs in any text content between tags
-                console.log('Attempting to replace tabs in any text content...');
-                result = result.replace(/>([^<]*)\t([^<]*)</g, (match, before, after) => {
-                    console.log(`Found tab between: "${before}" and "${after}"`);
-                    // If we're inside a <w:t> element, don't add extra wrapping
-                    if (match.includes('<w:t')) {
-                        return `>${before}${replacement}${after}<`;
-                    } else {
-                        // If not in a text element, wrap the replacement
-                        return `>${before}<w:t>${replacement}</w:t>${after}<`;
-                    }
-                });
-                
-                if (result !== xml) {
-                    console.log('✓ Successfully replaced tabs in text content');
-                    return result;
-                }
-                
-                // Strategy 4: Search for common tab patterns in DOCX
-                console.log('Attempting to find tab patterns in XML...');
-                
-                // Look for patterns that might indicate tabs
-                const tabPatterns = [
-                    /<w:tab[^>]*\/>/g,  // Self-closing tab elements
-                    /<w:tab[^>]*><\/w:tab>/g,  // Empty tab elements
-                    /\t/g  // Literal tab characters anywhere
-                ];
-                
-                for (const pattern of tabPatterns) {
-                    const matches = xml.match(pattern);
-                    if (matches) {
-                        console.log(`Found ${matches.length} matches for pattern:`, pattern);
-                        
-                        // For <w:tab> elements, wrap replacement in <w:t>
-                        if (pattern.toString().includes('w:tab')) {
-                            result = xml.replace(pattern, `<w:t>${replacement}</w:t>`);
-                        } else {
-                            result = xml.replace(pattern, replacement);
-                        }
-                        
-                        if (result !== xml) {
-                            console.log('✓ Successfully replaced using pattern match');
-                            return result;
-                        }
-                    }
-                }
+                console.log('Delegating tab replacement to specialized method');
+                return this.replaceTabCharacter(xml, replacement, maxReplacements);
             }
             
-            // For other whitespace characters, use the original approach
+            // For other whitespace characters, use a controlled approach
             let safePattern = original
                 .replace(/\t/g, '\\t')
                 .replace(/\n/g, '\\n')
                 .replace(/\r/g, '\\r')
                 .replace(/ /g, '\\s');
             
-            const whitespaceRegex = new RegExp(safePattern, 'g');
-            result = xml.replace(whitespaceRegex, replacement);
+            console.log(`Replacing whitespace pattern: "${safePattern}" with max replacements: ${maxReplacements || 'unlimited'}`);
+            
+            if (maxReplacements && maxReplacements > 0) {
+                let replacementsMade = 0;
+                const whitespaceRegex = new RegExp(safePattern, 'g');
+                result = xml.replace(whitespaceRegex, (match) => {
+                    if (replacementsMade < maxReplacements) {
+                        replacementsMade++;
+                        return replacement;
+                    }
+                    return match;
+                });
+            } else {
+                const whitespaceRegex = new RegExp(safePattern, 'g');
+                result = xml.replace(whitespaceRegex, replacement);
+            }
             
             if (result === xml) {
                 // Look for the whitespace pattern in text content between tags
+                let replacementsMade = 0;
                 result = xml.replace(/>([^<]*)</g, (match, textContent) => {
                     if (textContent.includes(original)) {
-                        const newContent = textContent.replace(new RegExp(this.escapeRegex(original), 'g'), replacement);
-                        return `>${newContent}<`;
+                        if (!maxReplacements || replacementsMade < maxReplacements) {
+                            const newContent = textContent.replace(new RegExp(this.escapeRegex(original), maxReplacements && maxReplacements - replacementsMade === 1 ? '' : 'g'), replacement);
+                            replacementsMade++;
+                            return `>${newContent}<`;
+                        }
                     }
                     return match;
                 });
@@ -374,22 +449,71 @@ class DocxTextReplacer implements DocxProcessor {
         }
     }
     
-    private replaceTabCharacter(xml: string, replacement: string): string {
+    private replaceTabCharacter(xml: string, replacement: string, maxReplacements?: number): string {
         try {
-            // Tab characters in DOCX are often represented as XML entities or special elements
-            // Look for actual tab characters first
-            let result = xml.replace(/\t/g, replacement);
+            console.log(`Replacing tab characters with "${replacement}", max replacements: ${maxReplacements || 'unlimited'}`);
             
-            // Also look for tab representations in DOCX XML
-            // Tabs might be represented as <w:tab/> elements
-            result = result.replace(/<w:tab\s*\/>/g, replacement);
+            let result = xml;
+            let replacementsMade = 0;
             
-            // Look for text content that contains tabs
-            result = result.replace(/>([^<]*\t[^<]*)</g, (match, textContent) => {
-                const newContent = textContent.replace(/\t/g, replacement);
-                return `>${newContent}<`;
-            });
+            // Strategy 1: Replace <w:tab/> elements (most common in DOCX)
+            // These need to be replaced with proper <w:t> elements containing the replacement text
+            const tabElementRegex = /<w:tab\s*\/>/g;
+            const wrappedReplacement = `<w:t>${replacement}</w:t>`;
             
+            if (maxReplacements && maxReplacements > 0) {
+                result = result.replace(tabElementRegex, (match) => {
+                    if (replacementsMade < maxReplacements) {
+                        replacementsMade++;
+                        console.log(`Replaced <w:tab/> element ${replacementsMade} with wrapped text`);
+                        return wrappedReplacement;
+                    }
+                    return match;
+                });
+            } else {
+                // Replace all occurrences
+                const tabMatches = result.match(tabElementRegex);
+                if (tabMatches) {
+                    console.log(`Found ${tabMatches.length} <w:tab/> elements to replace`);
+                    result = result.replace(tabElementRegex, wrappedReplacement);
+                    replacementsMade = tabMatches.length;
+                }
+            }
+            
+            // Strategy 2: Replace literal tab characters within <w:t> elements
+            if (!maxReplacements || replacementsMade < maxReplacements) {
+                result = result.replace(/<w:t([^>]*)>([^<]*\t[^<]*)<\/w:t>/g, (match, attributes, textContent) => {
+                    if (!maxReplacements || replacementsMade < maxReplacements) {
+                        console.log(`Found tab in text element: "${textContent}"`);
+                        const newContent = textContent.replace(/\t/g, replacement);
+                        replacementsMade++;
+                        return `<w:t${attributes}>${newContent}</w:t>`;
+                    }
+                    return match;
+                });
+            }
+            
+            // Strategy 3: Replace any remaining literal tab characters (fallback)
+            if (!maxReplacements || replacementsMade < maxReplacements) {
+                if (maxReplacements && maxReplacements > 0) {
+                    result = result.replace(/\t/g, (match) => {
+                        if (replacementsMade < maxReplacements) {
+                            replacementsMade++;
+                            return replacement;
+                        }
+                        return match;
+                    });
+                } else {
+                    const literalTabs = (result.match(/\t/g) || []).length;
+                    if (literalTabs > 0) {
+                        console.log(`Replacing ${literalTabs} literal tab characters`);
+                        result = result.replace(/\t/g, replacement);
+                        replacementsMade += literalTabs;
+                    }
+                }
+            }
+            
+            console.log(`Tab replacement complete: ${replacementsMade} replacements made`);
             return result;
             
         } catch (error) {
@@ -424,6 +548,81 @@ class DocxTextReplacer implements DocxProcessor {
     
     private escapeRegex(text: string): string {
         return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+    
+    private countOccurrences(text: string, searchString: string): number {
+        if (!searchString || searchString.length === 0) {
+            return 0;
+        }
+        
+        // Special handling for tab characters - count <w:tab/> elements in XML
+        if (searchString === '\t') {
+            const tabElements = text.match(/<w:tab[^>]*\/?>/g);
+            const literalTabs = text.match(/\t/g);
+            const totalTabs = (tabElements ? tabElements.length : 0) + (literalTabs ? literalTabs.length : 0);
+            console.log(`Counting tabs: ${tabElements ? tabElements.length : 0} <w:tab> elements + ${literalTabs ? literalTabs.length : 0} literal tabs = ${totalTabs} total`);
+            return totalTabs;
+        }
+        
+        const regex = new RegExp(this.escapeRegex(searchString), 'g');
+        const matches = text.match(regex);
+        return matches ? matches.length : 0;
+    }
+    
+    private isValidXml(xml: string): boolean {
+        try {
+            // Basic XML validation: check for balanced tags and no malformed content
+            
+            // Check for basic XML structure issues
+            if (xml.includes('<>') || xml.includes('</>')) {
+                console.error('XML contains empty tags');
+                return false;
+            }
+            
+            // Check for unclosed/malformed tags (basic check)
+            const tagStack: string[] = [];
+            const tagRegex = /<\/?([a-zA-Z:][a-zA-Z0-9:._-]*)[^>]*>/g;
+            let match;
+            
+            while ((match = tagRegex.exec(xml)) !== null) {
+                const fullTag = match[0];
+                const tagName = match[1];
+                
+                // Skip self-closing tags and processing instructions
+                if (fullTag.endsWith('/>') || fullTag.startsWith('<?') || fullTag.startsWith('<!')) {
+                    continue;
+                }
+                
+                if (fullTag.startsWith('</')) {
+                    // Closing tag
+                    const expectedTag = tagStack.pop();
+                    if (expectedTag !== tagName) {
+                        console.error(`XML tag mismatch: expected </${expectedTag}> but found </${tagName}>`);
+                        return false;
+                    }
+                } else {
+                    // Opening tag
+                    tagStack.push(tagName);
+                }
+            }
+            
+            if (tagStack.length > 0) {
+                console.error(`XML has unclosed tags: ${tagStack.join(', ')}`);
+                return false;
+            }
+            
+            // Check for common XML corruption patterns
+            if (xml.includes('<<') || xml.includes('>>')) {
+                console.error('XML contains doubled angle brackets');
+                return false;
+            }
+            
+            return true;
+            
+        } catch (error) {
+            console.error('Error validating XML:', error);
+            return false;
+        }
     }
 }
 

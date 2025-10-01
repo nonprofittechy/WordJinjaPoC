@@ -219,7 +219,9 @@ const App: React.FC = () => {
             const errorMessage = e instanceof Error ? e.message : 'Unknown error';
             let userFriendlyMessage = 'Could not process the original DOCX file. ';
             
-            if (errorMessage.includes('document.xml')) {
+            if (errorMessage.includes('invalid XML structure')) {
+                userFriendlyMessage += 'The selected text spans across formatting boundaries. Try selecting smaller, continuous text portions or use the AI-suggested labels instead.';
+            } else if (errorMessage.includes('document.xml')) {
                 userFriendlyMessage += 'The DOCX file structure is not supported or may be corrupted.';
             } else if (errorMessage.includes('ZIP') || errorMessage.includes('zip')) {
                 userFriendlyMessage += 'Could not read the DOCX file format. Please ensure it is a valid Word document.';
