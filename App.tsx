@@ -5,6 +5,9 @@ import { DocumentPreview } from './components/DocumentPreview';
 import { SuggestionsList } from './components/SuggestionsList';
 import { Loader } from './components/Loader';
 import { CreateLabelModal } from './components/CreateLabelModal';
+import { CustomizePromptModal } from './components/CustomizePromptModal';
+import { SettingsIcon } from './components/icons/SettingsIcon'
+import RefreshIcon from './components/icons/RefreshIcon'
 import { generateJinjaLabels } from './services/geminiService';
 import { docxProcessor } from './services/docxProcessor';
 import { Suggestion, SuggestionStatus } from './types';
@@ -20,6 +23,37 @@ const App: React.FC = () => {
     const [error, setError] = useState<string>('');
     const [selectedText, setSelectedText] = useState<string>('');
     const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
+    const [isPromptModalOpen, setIsPromptModalOpen] = useState<boolean>(false);
+    const [customPrompt, setCustomPrompt] = useState<string>('');
+    const [additionalInstructions, setAdditionalInstructions] = useState<string>('');
+
+    // Initialize default prompt on component mount
+    useEffect(() => {
+        const defaultPrompt = `You are an expert legal tech assistant. Your task is to process a text document and identify placeholders, turning it into a Jinja2 template. You will return a JSON structure that specifies the modifications.
+
+## Instructions:
+1.  **Analyze**: Read the document text and identify any placeholder text (e.g., "John Smith", "________", "[Client's Name]").
+2.  **Label**: Replace these placeholders with appropriate Jinja2 variable names based on the provided conventions.
+3.  **Contextualize**: For each replacement, provide a snippet of the surrounding text (the "context") to ensure the replacement is unique and understandable. The original placeholder must be part of the context.
+4.  **Format**: Return the result as a JSON object containing a single key "results", which is an array of suggestion objects. Each object must have "context", "original" (the exact text to be replaced), and "replacement" (the new Jinja2 label).
+
+## Variable Naming Rules:
+-   Use Python snake_case for variable names.
+-   Represent people in lists (e.g., \`users\`, \`clients\`, \`other_parties\`). Access individuals with an index (e.g., \`users[0]\`).
+-   Use Docassemble object conventions:
+    -   **Names**: \`users[0].name.full()\`, \`users[0].name.first\`, \`users[0].name.last\`.
+    -   **Addresses**: \`users[0].address.block()\`, \`users[0].address.city\`, \`users[0].address.zip\`.
+    -   **Contact**: \`users[0].phone_number\`, \`users[0].email\`.
+    -   **Dates**: Use the \`_date\` suffix, e.g., \`signature_date\`.
+-   Common list names: \`users\`, \`clients\`, \`plaintiffs\`, \`defendants\`, \`children\`, \`attorneys\`, \`witnesses\`.
+-   For generic placeholders, create a descriptive variable name (e.g., "reason for eviction" becomes \`{{ eviction_reason }}\`).
+
+Whenever you can guess the context of the user of the form, use the label "users" for the person who would use the form.
+Then, use the label "other_parties" for the person who would be on the other side of the form - opposing party in a lawsuit,
+the recipient of a letter, etc.`;
+
+        setCustomPrompt(defaultPrompt);
+    }, []);
 
     const resetState = () => {
         setFile(null);
@@ -54,7 +88,7 @@ const App: React.FC = () => {
             setLoadingMessage('Generating AI suggestions...');
             console.log('Calling generateJinjaLabels with text length:', textResult.value.length);
             
-            const aiSuggestions = await generateJinjaLabels(textResult.value);
+            const aiSuggestions = await generateJinjaLabels(textResult.value, customPrompt, additionalInstructions);
             console.log('Received AI suggestions:', {
                 count: aiSuggestions?.length || 0,
                 suggestions: aiSuggestions
@@ -91,27 +125,34 @@ const App: React.FC = () => {
             return;
         }
 
-        const replacements = new Map<string, string>();
         const activeSuggestions = suggestions.filter(s => s.status !== SuggestionStatus.Rejected);
 
-        activeSuggestions.forEach(s => {
-            const className = s.status === SuggestionStatus.Accepted ? 'suggestion-highlight' : 'suggestion-pending-highlight';
-            const highlightedReplacement = `<span class="${className}">${s.replacement}</span>`;
-            replacements.set(s.original, highlightedReplacement);
-        });
-
-        if (replacements.size === 0) {
+        if (activeSuggestions.length === 0) {
             setModifiedHtml(originalHtml);
             return;
         }
 
-        const originals = Array.from(replacements.keys());
-        const escapedOriginals = originals.map(o => o.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-        const regex = new RegExp(escapedOriginals.join('|'), 'g');
-        
-        const newHtml = originalHtml.replace(regex, (matched) => replacements.get(matched) || matched);
+        // Simple approach: replace first occurrence of each suggestion, allowing duplicates
+        let modifiedHtml = originalHtml;
 
-        setModifiedHtml(newHtml);
+        // Sort by length (longest first) to avoid partial replacements
+        const sortedSuggestions = activeSuggestions.sort((a, b) => b.original.length - a.original.length);
+        
+        sortedSuggestions.forEach(suggestion => {
+            const className = suggestion.status === SuggestionStatus.Accepted ? 'suggestion-highlight' : 'suggestion-pending-highlight';
+            const highlightedReplacement = `<span class="${className}">${suggestion.replacement}</span>`;
+            
+            // Escape regex special characters for safe replacement
+            const escapedOriginal = suggestion.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(escapedOriginal);
+            
+            // Replace first occurrence of this original text
+            if (regex.test(modifiedHtml)) {
+                modifiedHtml = modifiedHtml.replace(regex, highlightedReplacement);
+            }
+        });
+
+        setModifiedHtml(modifiedHtml);
     }, [suggestions, originalHtml]);
 
 
@@ -167,6 +208,57 @@ const App: React.FC = () => {
             window.getSelection()?.removeAllRanges();
         }
     }, []);
+
+    const handleCustomizePrompt = useCallback(() => {
+        setIsPromptModalOpen(true);
+    }, []);
+
+    const handlePromptSave = useCallback((newPrompt: string, newAdditionalInstructions: string) => {
+        setCustomPrompt(newPrompt);
+        setAdditionalInstructions(newAdditionalInstructions);
+        console.log('Prompt updated:', { promptLength: newPrompt.length, hasAdditionalInstructions: !!newAdditionalInstructions });
+    }, []);
+
+    const handleRegenerateSuggestions = useCallback(async () => {
+        if (!file || !originalHtml) {
+            setError('No document loaded. Please upload a DOCX file first.');
+            return;
+        }
+
+        try {
+            setIsLoading(true);
+            setError('');
+            setLoadingMessage('Re-generating AI suggestions with custom prompt...');
+
+            // Extract text from the original HTML again
+            const textResult = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
+            console.log('Re-generating with text length:', textResult.value.length);
+            
+            const aiSuggestions = await generateJinjaLabels(textResult.value, customPrompt, additionalInstructions);
+            console.log('Received new AI suggestions:', {
+                count: aiSuggestions?.length || 0,
+                suggestions: aiSuggestions
+            });
+
+            const suggestionsWithIds: Suggestion[] = aiSuggestions.map(s => ({
+                id: crypto.randomUUID(),
+                context: s.context,
+                original: s.original,
+                replacement: s.replacement,
+                status: SuggestionStatus.Pending,
+            }));
+
+            setSuggestions(suggestionsWithIds);
+            setLoadingMessage('');
+
+        } catch (err) {
+            console.error('Error regenerating suggestions:', err);
+            setError(err instanceof Error ? `Failed to regenerate suggestions: ${err.message}` : 'Failed to regenerate suggestions.');
+        } finally {
+            setIsLoading(false);
+            setLoadingMessage('');
+        }
+    }, [file, originalHtml, customPrompt, additionalInstructions]);
 
     const handleDownload = async () => {
         if (!file || !originalHtml) {
@@ -249,13 +341,25 @@ const App: React.FC = () => {
                         <Loader message={loadingMessage} />
                     ) : (
                         <>
-                            {/* Debug info */}
-                            <div className="bg-gray-700 p-2 rounded text-xs text-gray-300">
-                                Debug: {suggestions.length} suggestions loaded, hasSuggestions: {hasSuggestions.toString()}
-                            </div>
-                            
                             {hasSuggestions ? (
                                 <>
+                                    <div className="flex justify-end gap-1 mb-4">
+                                        <button
+                                            onClick={handleCustomizePrompt}
+                                            title="Customize AI prompt and instructions"
+                                            className="p-2 bg-gray-700/50 hover:bg-gray-600 text-gray-400 hover:text-white border border-gray-600 hover:border-gray-500 rounded transition-all duration-200"
+                                        >
+                                            <SettingsIcon className="w-4 h-4" />
+                                        </button>
+                                        <button
+                                            onClick={handleRegenerateSuggestions}
+                                            disabled={isLoading}
+                                            title={isLoading ? 'Regenerating suggestions...' : 'Regenerate suggestions with current prompt'}
+                                            className="p-2 bg-gray-700/50 hover:bg-gray-600 disabled:bg-gray-800/50 disabled:cursor-not-allowed text-gray-400 hover:text-white disabled:text-gray-500 border border-gray-600 hover:border-gray-500 disabled:border-gray-700 rounded transition-all duration-200"
+                                        >
+                                            <RefreshIcon className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+                                        </button>
+                                    </div>
                                     <SuggestionsList suggestions={suggestions} onUpdate={handleSuggestionUpdate} onAcceptAll={handleAcceptAll} />
                                     <button
                                         onClick={handleDownload}
@@ -291,6 +395,14 @@ const App: React.FC = () => {
                 selectedText={selectedText}
                 onClose={handleCloseModal}
                 onCreate={handleCreateLabel}
+            />
+            
+            <CustomizePromptModal
+                isOpen={isPromptModalOpen}
+                onClose={() => setIsPromptModalOpen(false)}
+                onSave={handlePromptSave}
+                currentPrompt={customPrompt}
+                currentAdditionalInstructions={additionalInstructions}
             />
         </div>
     );

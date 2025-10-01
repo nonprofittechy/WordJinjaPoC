@@ -88,9 +88,16 @@ class DocxTextReplacer implements DocxProcessor {
                         const tabElementsInSample = (tabSample.match(/<w:tab[^>]*\/?>/g) || []).length;
                         console.log(`Debug: First 1000 chars contain ${tabElementsInSample} <w:tab> elements`);
                     } else {
-                        console.log(`⚠ Text "${displayOriginal}" not found in document, skipping`);
+                        console.log(`⚠ Text "${displayOriginal}" not found in document directly`);
+                        
+                        // Check if text exists in plain text (might be split across elements)
+                        const currentPlainText = this.extractPlainTextFromXml(modifiedXml);
+                        if (!currentPlainText.includes(suggestion.original)) {
+                            console.log(`⚠ Text "${displayOriginal}" not found anywhere, skipping`);
+                            return;
+                        }
+                        console.log(`✓ Found "${displayOriginal}" in plain text - attempting cross-element replacement`);
                     }
-                    return;
                 }
                 
                 if (occurrenceCount > 10) {
@@ -103,6 +110,30 @@ class DocxTextReplacer implements DocxProcessor {
                     
                     // Use a safer replacement approach with limits
                     modifiedXml = this.safeReplaceText(modifiedXml, suggestion.original, suggestion.replacement, Math.min(occurrenceCount, 1));
+                    
+                    // If direct replacement failed but text exists in plain text, try cross-element replacement
+                    const newLength = modifiedXml.length;
+                    if (newLength === beforeLength && occurrenceCount === 0) {
+                        console.log(`Direct replacement failed, trying cross-element replacement for "${displayOriginal}"`);
+                        
+                        // First try the simple cross-element method
+                        let crossResult = this.replaceTextAcrossXmlTags(modifiedXml, suggestion.original, suggestion.replacement, 1);
+                        if (crossResult !== modifiedXml) {
+                            modifiedXml = crossResult;
+                            console.log(`Simple cross-element replacement succeeded for "${displayOriginal}"`);
+                        } else {
+                            console.log(`Simple cross-element replacement failed, trying complex multi-element replacement`);
+                            
+                            // Try the more sophisticated method for text spanning multiple elements
+                            crossResult = this.replaceTextSpanningMultipleElements(modifiedXml, suggestion.original, suggestion.replacement);
+                            if (crossResult !== modifiedXml) {
+                                modifiedXml = crossResult;
+                                console.log(`Complex multi-element replacement succeeded for "${displayOriginal}"`);
+                            } else {
+                                console.log(`All cross-element replacement attempts failed for "${displayOriginal}"`);
+                            }
+                        }
+                    }
                     
                     const afterLength = modifiedXml.length;
                     const wasReplaced = afterLength !== beforeLength;
@@ -247,6 +278,87 @@ class DocxTextReplacer implements DocxProcessor {
         }
         
         return result;
+    }
+
+    private replaceTextSpanningMultipleElements(xml: string, searchText: string, replacement: string): string {
+        console.log(`Attempting complex cross-element replacement for: "${searchText}"`);
+        
+        try {
+            // Strategy: Find all <w:t> elements and their text content, 
+            // then see if concatenating them (ignoring other elements) contains our search text
+            
+            // Extract all <w:t> elements with their positions
+            const textElements: Array<{
+                fullMatch: string;
+                startPos: number;
+                endPos: number;
+                textContent: string;
+                attributes: string;
+            }> = [];
+            
+            const textElementRegex = /<w:t([^>]*)>([^<]*)<\/w:t>/g;
+            let match;
+            
+            while ((match = textElementRegex.exec(xml)) !== null) {
+                textElements.push({
+                    fullMatch: match[0],
+                    startPos: match.index,
+                    endPos: match.index + match[0].length,
+                    textContent: match[2],
+                    attributes: match[1]
+                });
+            }
+            
+            if (textElements.length === 0) {
+                console.log('No <w:t> elements found');
+                return xml;
+            }
+            
+            // Try to find the search text by concatenating consecutive <w:t> elements
+            // (allowing for other XML elements in between)
+            for (let startIdx = 0; startIdx < textElements.length; startIdx++) {
+                let combinedText = textElements[startIdx].textContent;
+                
+                // Try extending the search by including subsequent elements
+                for (let endIdx = startIdx; endIdx < textElements.length; endIdx++) {
+                    if (endIdx > startIdx) {
+                        combinedText += textElements[endIdx].textContent;
+                    }
+                    
+                    // Check if our combined text contains the search text
+                    if (combinedText.includes(searchText)) {
+                        console.log(`Found "${searchText}" spanning elements ${startIdx} to ${endIdx}`);
+                        console.log(`Combined text: "${combinedText}"`);
+                        
+                        // Found it! Now we need to replace and reconstruct
+                        const replacedText = combinedText.replace(searchText, replacement);
+                        
+                        // Create a single replacement element
+                        const newElement = `<w:t${textElements[startIdx].attributes}>${this.escapeXml(replacedText)}</w:t>`;
+                        
+                        // Replace from start of first element to end of last element
+                        const beforePart = xml.substring(0, textElements[startIdx].startPos);
+                        const afterPart = xml.substring(textElements[endIdx].endPos);
+                        
+                        const result = beforePart + newElement + afterPart;
+                        console.log(`Successfully replaced text spanning multiple elements`);
+                        return result;
+                    }
+                    
+                    // If we've already found a match or gone too far, break
+                    if (combinedText.length > searchText.length * 2) {
+                        break;
+                    }
+                }
+            }
+            
+            console.log(`Search text "${searchText}" not found in any combination of elements`);
+            return xml;
+            
+        } catch (error) {
+            console.error('Error in complex cross-element replacement:', error);
+            return xml;
+        }
     }
     
     private findSimilarText(plainText: string, searchText: string): string | null {

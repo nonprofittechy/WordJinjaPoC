@@ -1,6 +1,10 @@
 import { AISuggestion } from '../types';
 
-export const generateJinjaLabels = async (documentText: string): Promise<AISuggestion[]> => {
+export const generateJinjaLabels = async (
+    documentText: string, 
+    customPrompt?: string, 
+    additionalInstructions?: string
+): Promise<AISuggestion[]> => {
     try {
         console.log('Calling backend API to generate labels...');
         
@@ -9,7 +13,11 @@ export const generateJinjaLabels = async (documentText: string): Promise<AISugge
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ documentText }),
+            body: JSON.stringify({ 
+                documentText, 
+                customPrompt,
+                additionalInstructions
+            }),
         });
 
         if (!response.ok) {

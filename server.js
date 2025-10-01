@@ -41,7 +41,7 @@ app.use(express.static('dist', {
 // API endpoint for Gemini
 app.post('/api/generate-labels', async (req, res) => {
     try {
-        const { documentText } = req.body;
+        const { documentText, customPrompt, additionalInstructions } = req.body;
         
         if (!documentText) {
             return res.status(400).json({ error: 'Document text is required' });
@@ -55,8 +55,8 @@ app.post('/api/generate-labels', async (req, res) => {
         console.log('Processing document text, length:', documentText.length);
         const startTime = Date.now();
 
-        const roleDescription = `
-You are an expert legal tech assistant. Your task is to process a text document and identify placeholders, turning it into a Jinja2 template. You will return a JSON structure that specifies the modifications.
+        // Use custom prompt if provided, otherwise use default
+        const defaultPrompt = `You are an expert legal tech assistant. Your task is to process a text document and identify placeholders, turning it into a Jinja2 template. You will return a JSON structure that specifies the modifications.
 
 ## Instructions:
 1.  **Analyze**: Read the document text and identify any placeholder text (e.g., "John Smith", "________", "[Client's Name]").
@@ -77,8 +77,17 @@ You are an expert legal tech assistant. Your task is to process a text document 
 
 Whenever you can guess the context of the user of the form, use the label "users" for the person who would use the form.
 Then, use the label "other_parties" for the person who would be on the other side of the form - opposing party in a lawsuit,
-the recipient of a letter, etc.
-`;
+the recipient of a letter, etc.`;
+
+        let roleDescription = customPrompt || defaultPrompt;
+
+        // Add additional instructions if provided
+        if (additionalInstructions && additionalInstructions.trim()) {
+            roleDescription += `\n\n## Additional Instructions:\n${additionalInstructions.trim()}`;
+        }
+
+        console.log('Using custom prompt:', !!customPrompt);
+        console.log('Additional instructions provided:', !!additionalInstructions);
 
         const responseSchema = {
             type: "object",
